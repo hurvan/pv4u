@@ -372,7 +372,7 @@ class EssChopper:
             self._consec_out += 1
             self._consec_in = 0
 
-        locked = int(self.grp.pvs["InPhs_R"].current()["value"])
+        locked = int(self.grp.pvs["InPhs_R"].current())
         if not locked and self._consec_in >= self.cfg.lock_acq_count:
             self.grp.post_num("InPhs_R", 1)
             self._transition_state("Locked")
