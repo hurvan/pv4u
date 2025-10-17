@@ -6,6 +6,7 @@ import math
 import random
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
@@ -90,6 +91,7 @@ class EssChopper:
         self._phase_err_hist: List[float] = []
         self._consec_in: int = 0
         self._consec_out: int = 0
+        self._diff_ns_samples = deque(maxlen=1000)
 
         self._rot_sense_idx: int = clamp(self.cfg.rot_sense_index, 0, 1)
         self._alarms_active = {s: False for s in self.ALARM_SUFFIXES}
@@ -159,7 +161,7 @@ class EssChopper:
         # EVR / TDC list (absolute epoch ns, flush at fixed rate)
         g.make_float("TSFlushRate_R", float(self.cfg.evr_flush_hz), writeable=False)
         g.make_array_int64("02-TS-I", init=[], writeable=False)
-        g.make_float("DiffTSSamples", 0.0, writeable=False)
+        g.make_array_int64("DiffTSSamples", init=[], writeable=False)
 
         # alarms
         for sfx in self.ALARM_SUFFIXES:
@@ -355,6 +357,7 @@ class EssChopper:
             err = self._wrap_to_frame((ts - frame_t0_ns) - self._phase_target_ns)
             last_err_ns = err
             self._phase_err_hist.append(err)
+            self._diff_ns_samples.append(int(round(err)))
             if len(self._phase_err_hist) > self.cfg.phase_err_window:
                 self._phase_err_hist.pop(0)
         if last_err_ns is None:
@@ -363,7 +366,7 @@ class EssChopper:
         self._pll_correct(last_err_ns)
         abs_us = abs(last_err_ns) / 1000.0
         self.grp.post_num("PHASE_ERR_US", abs_us)
-        self.grp.post_num("DiffTSSamples", float(last_err_ns))
+        self.grp.post_array("DiffTSSamples", list(self._diff_ns_samples))
 
         if abs_us <= self.cfg.lock_thr_us:
             self._consec_in += 1
