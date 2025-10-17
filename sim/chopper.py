@@ -97,6 +97,8 @@ class EssChopper:
         self._consec_in: int = 0
         self._consec_out: int = 0
         self._diff_ns_samples = deque(maxlen=1000)
+        self._diff_publish_every = 100  # post every 100 new errors
+        self._diff_since_pub = 0
 
         self._rot_sense_idx: int = clamp(self.cfg.rot_sense_index, 0, 1)
         self._alarms_active = {s: False for s in self.ALARM_SUFFIXES}
@@ -363,65 +365,59 @@ class EssChopper:
             self._last_tdc_ns = out[-1]
         return out
 
+    def _maybe_publish_diff_samples(self, added: int = 0, force: bool = False):
+        self._diff_since_pub += added
+        if force or self._diff_since_pub >= self._diff_publish_every:
+            # send a snapshot of the last 1000 errors
+            self.grp.post_array("DiffTSSamples", list(self._diff_ns_samples))
+            self._diff_since_pub = 0
+
     # ---- Lock/PLL against nearest EVR drive pulse ----
     def _update_lock_metrics(self, frame_t0_ns: int, tdcs: List[int]):
         if not tdcs:
             return
 
-        # EVR drive follows Spd_S (14, 28, 42, ...)
         self._update_evr_drive_hz()
         Tdrv = 1e9 / max(1e-6, abs(self._evr_drive_hz))
 
-        # GUI offset contributes to desired delay only (not generation)
         rev_ns_opt = self._rev_period_ns()
-        gui_ns = 0.0
-        if rev_ns_opt is not None:
-            gui_ns = (self.cfg.tdc_offset_deg / 360.0) * rev_ns_opt
-
-        # Desired time offset rotor -> EVR drive pulse
+        gui_ns = 0.0 if rev_ns_opt is None else (self.cfg.tdc_offset_deg / 360.0) * rev_ns_opt
         tau_ns = float(self._phase_target_ns + gui_ns)
 
         best_err = None
+        added = 0  # <— count how many samples we appended this frame
 
         for ts in tdcs:
-            # nearest EVR drive pulse to this TDC hit
             k = int(round((ts - self._evr_phase_ns) / Tdrv))
             evr_ts = self._evr_phase_ns + k * Tdrv
+            err = self._wrap_to_period((ts - evr_ts) - tau_ns, Tdrv) + random.gauss(0.0, self.cfg.jitter_ns_rms) if self.cfg.jitter_ns_rms > 0.0 else 0.0
 
-            # wrapped error to current EVR drive period
-            err = self._wrap_to_period((ts - evr_ts) - tau_ns, Tdrv)
-
-            # history + histogram
             self._phase_err_hist.append(err)
             if len(self._phase_err_hist) > self.cfg.phase_err_window:
                 self._phase_err_hist.pop(0)
+
             self._diff_ns_samples.append(int(round(err)))
+            added += 1
 
             if best_err is None or abs(err) < abs(best_err):
                 best_err = err
 
+        # Throttled publish
+        self._maybe_publish_diff_samples(added=added)
+
         if best_err is None:
-            self.grp.post_array("DiffTSSamples", list(self._diff_ns_samples))
             return
 
-        # PLL: move EVR phase toward rotor (bounded correction)
         corr = clamp(self.cfg.pll_gain * best_err, -0.5 * Tdrv, 0.5 * Tdrv)
-        self._evr_phase_ns += corr
-        # keep phase origin bounded to avoid overflow
-        self._evr_phase_ns = self._evr_phase_ns % Tdrv
+        self._evr_phase_ns = (self._evr_phase_ns + corr) % Tdrv
 
-        # Publish metrics
         abs_us = abs(best_err) / 1000.0
         self.grp.post_num("PHASE_ERR_US", abs_us)
-        self.grp.post_array("DiffTSSamples", list(self._diff_ns_samples))
 
-        # Lock/unlock logic
         if abs_us <= self.cfg.lock_thr_us:
-            self._consec_in += 1
-            self._consec_out = 0
+            self._consec_in, self._consec_out = self._consec_in + 1, 0
         elif abs_us >= self.cfg.lock_loss_us:
-            self._consec_out += 1
-            self._consec_in = 0
+            self._consec_out, self._consec_in = self._consec_out + 1, 0
 
         locked = int(self.grp.pvs["InPhs_R"].current())
         if not locked and self._consec_in >= self.cfg.lock_acq_count:
