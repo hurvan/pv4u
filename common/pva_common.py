@@ -194,33 +194,13 @@ class PVGroup:
         if not (0 <= idx < len(choices)):
             raise ValueError(f"enum index {idx} out of range 0..{len(choices) - 1}")
 
-        V = nt.wrap(idx, choices=list(choices), timestamp=self._time_fn())
-        V["display.limitLow"] = 0
-        V["display.limitHigh"] = len(choices) - 1
-        V["control.limitLow"] = 0
-        V["control.limitHigh"] = len(choices) - 1
-        V["control.minStep"] = 1
-        V["alarm.severity"] = 0
-        V["alarm.status"] = 0
-        V["alarm.message"] = "NO_ALARM"
-
-        pv = SharedPV(initial=V)
+        # IMPORTANT: create PV with nt=nt AND open with a plain index (not a Value, not a dict)
+        pv = SharedPV(nt=nt)
         self.pvs[suffix] = pv
-
-        base_display = V["display"]
-        base_control = V["control"]
-        base_alarm = V["alarm"]
+        pv.open(idx, choices=list(choices), timestamp=self._time_fn())
 
         def _parse_enum_put(payload) -> int:
-            """
-            Accepts:
-              - int / float (index)
-              - str  (choice name or stringified index)
-              - dict with {"value": {"index": ...}} or {"value": "Start"} etc.
-              - p4p.Value with fields 'value.index', or nested 'value' struct
-            """
-
-            # Helper: map a string to index (numeric or by choice name, case-insensitive)
+            # accept ints, floats, strings (name or "2"), dicts, and p4p.Value-shapes
             def _str_to_idx(s: str) -> int:
                 s = s.strip()
                 if s.lstrip("-").isdigit():
@@ -231,52 +211,36 @@ class PVGroup:
                     lower = [c.lower() for c in choices]
                     return lower.index(s.lower())
 
-            # 1) p4p.Value payload?
+            # p4p.Value-like
             try:
-                # duck-type for p4p.Value: has .get and likely .type()
                 if hasattr(payload, "get") and callable(getattr(payload, "get")):
-                    # Try direct dotted field first
-                    try:
-                        v = payload.get("value.index", None)
-                        if v is not None:
-                            return int(v)
-                    except Exception:
-                        pass
-
-                    # Try nested 'value' struct
-                    try:
-                        v = payload.get("value", None)
-                        if v is not None:
-                            if hasattr(v, "get") and callable(getattr(v, "get")):
-                                ii = v.get("index", None)
-                                if ii is not None:
-                                    return int(ii)
-                                vv = v.get("value", None)
-                                if vv is not None:
-                                    if isinstance(vv, (int, float)):
-                                        return int(vv)
-                                    if isinstance(vv, str):
-                                        return _str_to_idx(vv)
-                            else:
-                                # 'value' is a plain type (int/float/str)
-                                if isinstance(v, (int, float)):
-                                    return int(v)
-                                if isinstance(v, str):
-                                    return _str_to_idx(v)
-                    except Exception:
-                        pass
-
-                    # Try top-level 'index'
-                    try:
-                        ii = payload.get("index", None)
-                        if ii is not None:
-                            return int(ii)
-                    except Exception:
-                        pass
+                    v = payload.get("value.index", None)
+                    if v is not None:
+                        return int(v)
+                    v = payload.get("value", None)
+                    if v is not None:
+                        if hasattr(v, "get") and callable(getattr(v, "get")):
+                            ii = v.get("index", None)
+                            if ii is not None:
+                                return int(ii)
+                            vv = v.get("value", None)
+                            if vv is not None:
+                                if isinstance(vv, (int, float)):
+                                    return int(vv)
+                                if isinstance(vv, str):
+                                    return _str_to_idx(vv)
+                        else:
+                            if isinstance(v, (int, float)):
+                                return int(v)
+                            if isinstance(v, str):
+                                return _str_to_idx(v)
+                    ii = payload.get("index", None)
+                    if ii is not None:
+                        return int(ii)
             except Exception:
                 pass
 
-            # 2) dict payload?
+            # dict
             if isinstance(payload, dict):
                 v = payload.get("value", payload)
                 if isinstance(v, dict):
@@ -288,21 +252,19 @@ class PVGroup:
                     return int(v)
                 if isinstance(v, str):
                     return _str_to_idx(v)
-                # fallback (rare)
                 return int(v)
 
-            # 3) simple scalars
+            # scalars
             if isinstance(payload, (int, float)):
                 return int(payload)
             if isinstance(payload, str):
                 return _str_to_idx(payload)
 
-            # 4) last resort
             return int(payload)
 
         if writeable:
             @pv.put
-            def _on_put(pv_obj, op, _suffix=suffix, _nt=nt, _choices=choices):
+            def _on_put(pv_obj, op, _suffix=suffix, _choices=choices):
                 raw = op.value()
                 try:
                     new_idx = _parse_enum_put(raw)
@@ -311,13 +273,12 @@ class PVGroup:
                 except Exception as e:
                     op.done(error=f"Bad put payload for {self.prefix}.{_suffix}: {e}")
                     return
+
                 if self._write_cb:
                     self._write_cb(_suffix, new_idx)
-                newV = _nt.wrap(new_idx, choices=list(_choices), timestamp=self._time_fn())
-                newV["display"] = base_display
-                newV["control"] = base_control
-                newV["alarm"] = base_alarm
-                pv_obj.post(newV)
+
+                # Post just the index. Do NOT post a Value or metadata dict for enums.
+                pv_obj.post(new_idx, timestamp=self._time_fn())
                 self._last_sent[_suffix] = (new_idx, 0, "")
                 op.done()
 
