@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Callable, Dict, Iterable, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Optional, Tuple, Sequence
 
 from p4p.nt import NTEnum, NTScalar
 from p4p.server.thread import SharedPV
@@ -14,9 +14,9 @@ class PVGroup:
     safe put handling, change coalescing, and RBV/VAL-style aliasing.
 
     Device simulators use:
-      - make_float / make_int / make_enum / make_str to declare PVs
+      - make_float / make_int / make_enum / make_str / make_array_* to declare PVs
       - set_write_cb(fn) to receive puts
-      - post_num / post_meta for updates
+      - post_num / post_meta / post_array for updates
       - create_root_alias(readback_suffix='RBV', setpoint_suffix='VAL')
       - post_root_num / post_root_meta
       - set_mdel(deadband_egu) to throttle updates for selected PVs
@@ -32,6 +32,7 @@ class PVGroup:
         write_cb: Optional[Callable[[str, Any], None]] = None,
         throttle_fields: Iterable[str] = ("RBV", "DRBV"),  # fields that obey MDEL
         time_fn: Callable[[], float] = time.time,
+        name_join: str = ".",  # <--- NEW: per-group joiner ('.' for fields by default)
     ):
         self.prefix = prefix.rstrip(":")
         self.default_units = default_units
@@ -43,6 +44,7 @@ class PVGroup:
         self._mdel: float = 0.0
         self._mdel_fields = set(throttle_fields)
         self._time_fn = time_fn
+        self.name_join = name_join  # '.' for record.fields, ':' for record:names
 
         # Root alias (optional; created with create_root_alias())
         self.root_nt: Optional[NTScalar] = None
@@ -210,29 +212,93 @@ class PVGroup:
         base_alarm = V["alarm"]
 
         def _parse_enum_put(payload) -> int:
-            v = payload
-            if isinstance(v, dict):
-                v = v.get("value", v)
+            """
+            Accepts:
+              - int / float (index)
+              - str  (choice name or stringified index)
+              - dict with {"value": {"index": ...}} or {"value": "Start"} etc.
+              - p4p.Value with fields 'value.index', or nested 'value' struct
+            """
+
+            # Helper: map a string to index (numeric or by choice name, case-insensitive)
+            def _str_to_idx(s: str) -> int:
+                s = s.strip()
+                if s.lstrip("-").isdigit():
+                    return int(s)
+                try:
+                    return choices.index(s)
+                except ValueError:
+                    lower = [c.lower() for c in choices]
+                    return lower.index(s.lower())
+
+            # 1) p4p.Value payload?
+            try:
+                # duck-type for p4p.Value: has .get and likely .type()
+                if hasattr(payload, "get") and callable(getattr(payload, "get")):
+                    # Try direct dotted field first
+                    try:
+                        v = payload.get("value.index", None)
+                        if v is not None:
+                            return int(v)
+                    except Exception:
+                        pass
+
+                    # Try nested 'value' struct
+                    try:
+                        v = payload.get("value", None)
+                        if v is not None:
+                            if hasattr(v, "get") and callable(getattr(v, "get")):
+                                ii = v.get("index", None)
+                                if ii is not None:
+                                    return int(ii)
+                                vv = v.get("value", None)
+                                if vv is not None:
+                                    if isinstance(vv, (int, float)):
+                                        return int(vv)
+                                    if isinstance(vv, str):
+                                        return _str_to_idx(vv)
+                            else:
+                                # 'value' is a plain type (int/float/str)
+                                if isinstance(v, (int, float)):
+                                    return int(v)
+                                if isinstance(v, str):
+                                    return _str_to_idx(v)
+                    except Exception:
+                        pass
+
+                    # Try top-level 'index'
+                    try:
+                        ii = payload.get("index", None)
+                        if ii is not None:
+                            return int(ii)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # 2) dict payload?
+            if isinstance(payload, dict):
+                v = payload.get("value", payload)
                 if isinstance(v, dict):
                     if "index" in v:
-                        v = v["index"]
-                    elif "value" in v:
+                        return int(v["index"])
+                    if "value" in v:
                         v = v["value"]
-            if isinstance(v, str):
-                s = v.strip()
-                if s.lstrip("-").isdigit():
-                    idx2 = int(s)
-                else:
-                    try:
-                        idx2 = choices.index(s)
-                    except ValueError:
-                        lower = [c.lower() for c in choices]
-                        idx2 = lower.index(s.lower())
-            else:
-                idx2 = int(v)
-            if not (0 <= idx2 < len(choices)):
-                raise ValueError(f"enum index {idx2} out of range 0..{len(choices) - 1}")
-            return idx2
+                if isinstance(v, (int, float)):
+                    return int(v)
+                if isinstance(v, str):
+                    return _str_to_idx(v)
+                # fallback (rare)
+                return int(v)
+
+            # 3) simple scalars
+            if isinstance(payload, (int, float)):
+                return int(payload)
+            if isinstance(payload, str):
+                return _str_to_idx(payload)
+
+            # 4) last resort
+            return int(payload)
 
         if writeable:
             @pv.put
@@ -240,6 +306,8 @@ class PVGroup:
                 raw = op.value()
                 try:
                     new_idx = _parse_enum_put(raw)
+                    if not (0 <= new_idx < len(_choices)):
+                        raise ValueError(f"enum index {new_idx} out of range 0..{len(_choices) - 1}")
                 except Exception as e:
                     op.done(error=f"Bad put payload for {self.prefix}.{_suffix}: {e}")
                     return
@@ -252,6 +320,53 @@ class PVGroup:
                 pv_obj.post(newV)
                 self._last_sent[_suffix] = (new_idx, 0, "")
                 op.done()
+
+    # ---------- Array PVs (added) ----------
+
+    def make_array_int64(self, suffix: str, init: Sequence[int] | None = None, *, writeable=False) -> None:
+        """
+        Create NTScalar('al') PV for array of int64 (e.g., lists of epoch-ns timestamps).
+        """
+        nt = NTScalar("al", display=True, form=True)
+        self.nts[suffix] = nt
+        pv = SharedPV(nt=nt)
+        self.pvs[suffix] = pv
+
+        initial = list(init) if init is not None else []
+        V = nt.wrap(initial, timestamp=self._time_fn())
+        V["alarm.severity"] = 0
+        V["alarm.status"] = 0
+        V["alarm.message"] = "NO_ALARM"
+        pv.open(V)
+
+        if writeable:
+            @pv.put
+            def _on_put(pv_obj, op, _suffix=suffix):
+                raw = op.value()
+                try:
+                    seq = raw["value"] if isinstance(raw, dict) else raw
+                    new = [int(x) for x in seq]
+                except Exception as e:
+                    op.done(error=f"Bad put payload for {self.prefix}.{_suffix}: {e}")
+                    return
+                if self._write_cb:
+                    self._write_cb(_suffix, new)
+                pv_obj.post(new, timestamp=self._time_fn())
+                self._last_sent[_suffix] = ("len", len(new), "")
+                op.done()
+
+    def post_array(
+        self,
+        suffix: str,
+        values: Sequence[int] | Sequence[float],
+        severity: int = 0,
+        message: str = "",
+    ) -> None:
+        """
+        Post a new array value (uses the same timestamp/severity/message style as scalars).
+        """
+        self.pvs[suffix].post(values, timestamp=self._time_fn(), severity=severity, message=message)
+        self._last_sent[suffix] = ("len", len(values), "")
 
     # ---------- alias PV ('<prefix>') ----------
 
@@ -443,11 +558,17 @@ class PVGroup:
 def build_provider_dict(groups: Dict[str, PVGroup]) -> Dict[str, SharedPV]:
     """
     Turn { '<prefix>': PVGroup } into the provider dict for p4p.Server.
-    Exposes all field PVs and the alias at '<prefix>' if present.
+    Exposes all PVs as '<prefix><join><suffix>' and the alias at '<prefix>' if present.
+
+    - Motor-style records with fields: join='.' (default)
+      e.g. 'SIM:M1.RBV', 'SIM:M1.VAL'
+    - Non-field records (like chopper props): join=':'
+      e.g. 'SIM:CHP1:Spd_S', 'SIM:CHP1:TotDly'
     """
     out: Dict[str, SharedPV] = {}
     for grp in groups.values():
-        out.update({f"{grp.prefix}.{k}": pv for k, pv in grp.pvs.items()})
+        join = grp.name_join or "."
+        out.update({f"{grp.prefix}{join}{k}": pv for k, pv in grp.pvs.items()})
         if grp.root_pv is not None:
             out[grp.prefix] = grp.root_pv
     return out
