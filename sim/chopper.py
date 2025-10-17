@@ -81,13 +81,18 @@ class EssChopper:
         self._chop_dly_ns: float = self.cfg.chop_delay_ns
         self._mech_dly_deg: float = self.cfg.mech_delay_deg
         self._beampos_dly_ns: float = self.cfg.beampos_delay_ns
-        self._phase_target_ns: float = 0.0
-        self._phase_offset_ns: float = 0.0
+        self._phase_target_ns: float = 0.0  # absolute desired time offset (ns) rotor->EVR drive pulse
 
-        self._evr_period_ns: int = int(round(1e9 / self.cfg.evr_flush_hz))
+        # EVR timing
+        self._evr_period_ns: int = int(round(1e9 / self.cfg.evr_flush_hz))   # fixed flush frame period
         self._last_flush_ns: int = now_ns()
+        self._evr_drive_hz: float = 14.0                                     # EVR drive output (follows Spd_S)
+        self._evr_phase_ns: float = float(now_ns())                          # absolute phase origin (ns) of EVR drive pulses
+
+        # TDC state
         self._last_tdc_ns: Optional[int] = None
 
+        # locking + history
         self._phase_err_hist: List[float] = []
         self._consec_in: int = 0
         self._consec_out: int = 0
@@ -241,6 +246,10 @@ class EssChopper:
 
     # ---- helpers ----
 
+    def _wrap_to_period(self, x_ns: float, P_ns: float) -> float:
+        """Wrap signed nanoseconds to [-P/2, +P/2)."""
+        return ((x_ns + 0.5 * P_ns) % P_ns) - 0.5 * P_ns
+
     def _transition_state(self, name: str):
         if name in self.STATE_CHOICES:
             self._state_idx = self.STATE_CHOICES.index(name)
@@ -258,6 +267,7 @@ class EssChopper:
         return 1e9 / f
 
     def _compute_totdly(self):
+        """Absolute desired time offset (ns) rotor→EVR drive pulse."""
         spd_mag = abs(self._spd_s_hz)
         mech_ns = 0.0 if spd_mag <= 0.0 else (self._mech_dly_deg / 360.0) * (1e9 / spd_mag)
         self._phase_target_ns = float(self._chop_dly_ns + self._beampos_dly_ns + mech_ns)
@@ -269,6 +279,7 @@ class EssChopper:
         else:
             phys_cw = (self._spd_r_hz > 0.0 and self._rot_sense_idx == 0) or (self._spd_r_hz < 0.0 and self._rot_sense_idx == 1)
             d = "CW" if phys_cw else "CCW"
+        # string PV; posting bare string is fine
         self.grp.pvs["Dir_R"].post(d)
 
     def _ramp_speed(self, dt: float, to_target: float):
@@ -309,65 +320,102 @@ class EssChopper:
         P = self._evr_period_ns
         return (t_ns // P) * P
 
-    def _pll_correct(self, last_err_ns: float):
-        gain = float(self.cfg.pll_gain)
-        corr = clamp(gain * last_err_ns, -0.5 * self._evr_period_ns, 0.5 * self._evr_period_ns)
-        self._phase_offset_ns -= corr
+    def _update_evr_drive_hz(self):
+        """Quantize EVR drive to integer multiples of the base (>= 1x)."""
+        base = float(self.cfg.evr_flush_hz)  # 14 Hz base
+        hz = abs(self._spd_s_hz)
+        if hz <= 0.0:
+            mult = 1
+        else:
+            mult = max(1, int(round(hz / base)))
+        self._evr_drive_hz = base * mult
 
-    def _wrap_to_frame(self, x_ns: float) -> float:
-        P = float(self._evr_period_ns)
-        return ((x_ns + 0.5 * P) % P) - 0.5 * P
-
+    # ---- TDC generation (rotor-driven, independent of EVR) ----
     def _simulate_tdc_flush(self, frame_t0_ns: int) -> List[int]:
+        """Generate rotor TDC timestamps inside [frame_t0, frame_t0+P)."""
         P = self._evr_period_ns
         start = frame_t0_ns
         end = frame_t0_ns + P
         out: List[int] = []
+
         f = abs(self._spd_r_hz)
         if f <= 0.0:
             return out
 
         rev_ns = 1e9 / f
-        gui_ns = (self.cfg.tdc_offset_deg / 360.0) * rev_ns
-        base = frame_t0_ns + int(self._phase_offset_ns + gui_ns)
 
+        # continue from previous TDC, or start just before frame start
         if self._last_tdc_ns is None:
-            n_back = int(math.ceil((base - start) / rev_ns))
-            t = int(base - n_back * rev_ns)
+            # ensure first >= start
+            t = int(start - rev_ns)
         else:
             t = int(self._last_tdc_ns)
 
         while t < start:
             t += int(rev_ns)
+
         while t < end:
-            j = int(random.gauss(0.0, self.cfg.jitter_ns_rms)) if self.cfg.jitter_ns_rms > 0.0 else 0
-            ts = t + j
-            out.append(int(ts))
+            jitter = int(random.gauss(0.0, self.cfg.jitter_ns_rms)) if self.cfg.jitter_ns_rms > 0.0 else 0
+            out.append(int(t + jitter))
             t += int(rev_ns)
 
         if out:
             self._last_tdc_ns = out[-1]
         return out
 
+    # ---- Lock/PLL against nearest EVR drive pulse ----
     def _update_lock_metrics(self, frame_t0_ns: int, tdcs: List[int]):
         if not tdcs:
             return
-        last_err_ns = None
+
+        # EVR drive follows Spd_S (14, 28, 42, ...)
+        self._update_evr_drive_hz()
+        Tdrv = 1e9 / max(1e-6, abs(self._evr_drive_hz))
+
+        # GUI offset contributes to desired delay only (not generation)
+        rev_ns_opt = self._rev_period_ns()
+        gui_ns = 0.0
+        if rev_ns_opt is not None:
+            gui_ns = (self.cfg.tdc_offset_deg / 360.0) * rev_ns_opt
+
+        # Desired time offset rotor -> EVR drive pulse
+        tau_ns = float(self._phase_target_ns + gui_ns)
+
+        best_err = None
+
         for ts in tdcs:
-            err = self._wrap_to_frame((ts - frame_t0_ns) - self._phase_target_ns)
-            last_err_ns = err
+            # nearest EVR drive pulse to this TDC hit
+            k = int(round((ts - self._evr_phase_ns) / Tdrv))
+            evr_ts = self._evr_phase_ns + k * Tdrv
+
+            # wrapped error to current EVR drive period
+            err = self._wrap_to_period((ts - evr_ts) - tau_ns, Tdrv)
+
+            # history + histogram
             self._phase_err_hist.append(err)
-            self._diff_ns_samples.append(int(round(err)))
             if len(self._phase_err_hist) > self.cfg.phase_err_window:
                 self._phase_err_hist.pop(0)
-        if last_err_ns is None:
+            self._diff_ns_samples.append(int(round(err)))
+
+            if best_err is None or abs(err) < abs(best_err):
+                best_err = err
+
+        if best_err is None:
+            self.grp.post_array("DiffTSSamples", list(self._diff_ns_samples))
             return
 
-        self._pll_correct(last_err_ns)
-        abs_us = abs(last_err_ns) / 1000.0
+        # PLL: move EVR phase toward rotor (bounded correction)
+        corr = clamp(self.cfg.pll_gain * best_err, -0.5 * Tdrv, 0.5 * Tdrv)
+        self._evr_phase_ns += corr
+        # keep phase origin bounded to avoid overflow
+        self._evr_phase_ns = self._evr_phase_ns % Tdrv
+
+        # Publish metrics
+        abs_us = abs(best_err) / 1000.0
         self.grp.post_num("PHASE_ERR_US", abs_us)
         self.grp.post_array("DiffTSSamples", list(self._diff_ns_samples))
 
+        # Lock/unlock logic
         if abs_us <= self.cfg.lock_thr_us:
             self._consec_in += 1
             self._consec_out = 0
@@ -424,7 +472,7 @@ class EssChopper:
 
             self._advance_resolver(dt)
 
-            # EVR flush
+            # EVR flush frame
             t_ns = now_ns()
             if t_ns >= next_flush:
                 frame_t0 = self._evr_frame_t0_ns(t_ns)
