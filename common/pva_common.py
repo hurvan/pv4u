@@ -53,6 +53,8 @@ class PVGroup:
         self._alias_readback: Optional[str] = None
         self._alias_setpoint: Optional[str] = None
 
+        self._enum_suffixes: set[str] = set()
+
     # ---------- configuration / DI ----------
 
     def set_write_cb(self, cb: Callable[[str, Any], None]) -> None:
@@ -199,104 +201,73 @@ class PVGroup:
     def make_enum(
         self, suffix: str, choices, *, init_index: int = 0, writeable=True
     ) -> None:
+        """
+        NTEnum PV with display/control/alarm. Uses SharedPV(initial=V, handler=...).
+        PUT calls write_cb and posts a freshly wrapped NTEnum Value.
+        """
         choices = list(choices)
         nt = NTEnum(display=True, control=True)
-        self.nts[suffix] = nt
+        self.nts[suffix] = nt  # record this is an enum (we'll use it in post_*)
 
         idx = int(init_index)
         if not (0 <= idx < len(choices)):
             raise ValueError(f"enum index {idx} out of range 0..{len(choices) - 1}")
 
-        # IMPORTANT: create PV with nt=nt AND open with a plain index (not a Value, not a dict)
-        pv = SharedPV(nt=nt)
-        self.pvs[suffix] = pv
-        pv.open(idx, choices=list(choices), timestamp=self._time_fn())
-
-        def _parse_enum_put(payload) -> int:
-            # accept ints, floats, strings (name or "2"), dicts, and p4p.Value-shapes
-            def _str_to_idx(s: str) -> int:
-                s = s.strip()
-                if s.lstrip("-").isdigit():
-                    return int(s)
-                try:
-                    return choices.index(s)
-                except ValueError:
-                    lower = [c.lower() for c in choices]
-                    return lower.index(s.lower())
-
-            # p4p.Value-like
-            try:
-                if hasattr(payload, "get") and callable(getattr(payload, "get")):
-                    v = payload.get("value.index", None)
-                    if v is not None:
-                        return int(v)
-                    v = payload.get("value", None)
-                    if v is not None:
-                        if hasattr(v, "get") and callable(getattr(v, "get")):
-                            ii = v.get("index", None)
-                            if ii is not None:
-                                return int(ii)
-                            vv = v.get("value", None)
-                            if vv is not None:
-                                if isinstance(vv, (int, float)):
-                                    return int(vv)
-                                if isinstance(vv, str):
-                                    return _str_to_idx(vv)
-                        else:
-                            if isinstance(v, (int, float)):
-                                return int(v)
-                            if isinstance(v, str):
-                                return _str_to_idx(v)
-                    ii = payload.get("index", None)
-                    if ii is not None:
-                        return int(ii)
-            except Exception:
-                pass
-
-            # dict
-            if isinstance(payload, dict):
-                v = payload.get("value", payload)
-                if isinstance(v, dict):
-                    if "index" in v:
-                        return int(v["index"])
-                    if "value" in v:
-                        v = v["value"]
-                if isinstance(v, (int, float)):
-                    return int(v)
-                if isinstance(v, str):
-                    return _str_to_idx(v)
-                return int(v)
-
-            # scalars
-            if isinstance(payload, (int, float)):
-                return int(payload)
-            if isinstance(payload, str):
-                return _str_to_idx(payload)
-
-            return int(payload)
+        V = nt.wrap(idx, choices=list(choices), timestamp=self._time_fn())
+        V["display.limitLow"] = 0
+        V["display.limitHigh"] = len(choices) - 1
+        V["display.description"] = "Enum PV"
+        V["control.limitLow"] = 0
+        V["control.limitHigh"] = len(choices) - 1
+        V["control.minStep"] = 1
+        V["alarm.severity"] = 0
+        V["alarm.status"] = 0
+        V["alarm.message"] = "NO_ALARM"
 
         if writeable:
 
-            @pv.put
-            def _on_put(pv_obj, op, _suffix=suffix, _choices=choices):
-                raw = op.value()
-                try:
-                    new_idx = _parse_enum_put(raw)
-                    if not (0 <= new_idx < len(_choices)):
+            class Handler:
+                def put(
+                    _self,
+                    pv,
+                    op,
+                    *,
+                    _nt=nt,
+                    _suffix=suffix,
+                    _choices=choices,
+                    _time_fn=self._time_fn,
+                    base_meta=V,
+                ):
+                    raw = op.value()
+                    new_idx = int(raw["value"]["index"])
+                    if new_idx < 0 or new_idx >= len(choices):
                         raise ValueError(
-                            f"enum index {new_idx} out of range 0..{len(_choices) - 1}"
+                            f"Index {new_idx} out of range for choices {choices}"
                         )
-                except Exception as e:
-                    op.done(error=f"Bad put payload for {self.prefix}.{_suffix}: {e}")
-                    return
 
-                if self._write_cb:
-                    self._write_cb(_suffix, new_idx)
+                    try:
+                        if self._write_cb:
+                            self._write_cb(_suffix, new_idx)
+                    except Exception as e:
+                        op.done(
+                            error=f"Write callback error for {self.prefix}.{_suffix}: {e}"
+                        )
 
-                # Post just the index. Do NOT post a Value or metadata dict for enums.
-                pv_obj.post(new_idx, timestamp=self._time_fn())
-                self._last_sent[_suffix] = (new_idx, 0, "")
-                op.done()
+                    newV = _nt.wrap(
+                        new_idx, choices=list(choices), timestamp=time.time()
+                    )
+                    newV["display"] = base_meta["display"]
+                    newV["control"] = base_meta["control"]
+                    newV["alarm"] = base_meta["alarm"]
+                    pv.post(newV)
+                    op.done()
+
+            pv = SharedPV(initial=V, handler=Handler())
+        else:
+            pv = SharedPV(initial=V)
+
+        self.pvs[suffix] = pv
+        self._enum_suffixes.add(suffix)
 
     # ---------- Array PVs (added) ----------
 
@@ -410,6 +381,36 @@ class PVGroup:
         pv = self.pvs[suffix]
         nt = self.nts[suffix]
         cur = pv.current()
+
+        # enum: rebuild a full Value; post without kwargs
+        if suffix in self._enum_suffixes:
+            print("POST ENUM META", suffix, updates)
+            try:
+                idx = int(cur["value.index"])
+            except Exception:
+                idx = 0
+            try:
+                ch = list(cur["value.choices"])
+            except Exception:
+                ch = None
+            V = nt.wrap(idx, choices=ch, timestamp=self._time_fn())
+            # apply updates directly into the Value
+            for k, v in updates.items():
+                try:
+                    V[k] = v
+                except Exception:
+                    pass
+            # preserve any fields we didn't touch
+            for key in ("display", "control", "alarm"):
+                if key not in updates:
+                    try:
+                        V[key] = cur[key]
+                    except Exception:
+                        pass
+            pv.post(V)
+            return
+
+        # non-enum: original path
         try:
             cur_val = cur["value"]
         except Exception:
@@ -452,6 +453,46 @@ class PVGroup:
         *,
         force: bool = False,
     ) -> None:
+        nt = self.nts.get(suffix)
+        pv = self.pvs[suffix]
+        cur = pv.current()
+
+        # enum: build an NTEnum Value and post without kwargs
+        if suffix in self._enum_suffixes:
+            print("POST ENUM", suffix, value)
+            prev = self._last_sent.get(suffix)
+            idx = int(value)
+            if not force and prev is not None and prev == (idx, severity, message):
+                return
+
+            # choices from current value (if missing, let wrap tolerate None)
+            try:
+                ch = list(cur["value.choices"])
+            except Exception:
+                ch = None
+
+            # Build a new Value exactly like the handler does
+            V = nt.wrap(idx, choices=ch, timestamp=self._time_fn())
+
+            # Carry over meta exactly, don't touch alarms here
+            try:
+                V["display"] = cur["display"]
+            except Exception:
+                pass
+            try:
+                V["control"] = cur["control"]
+            except Exception:
+                pass
+            try:
+                V["alarm"] = cur["alarm"]
+            except Exception:
+                pass
+
+            pv.post(V)  # IMPORTANT: no kwargs
+            self._last_sent[suffix] = (idx, severity, message)
+            return
+
+        # non-enum: original path
         prev = self._last_sent.get(suffix)
         if not force and self._should_throttle(suffix, value, severity, message, prev):
             return
