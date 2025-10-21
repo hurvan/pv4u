@@ -53,7 +53,10 @@ class PVGroup:
         self._alias_readback: Optional[str] = None
         self._alias_setpoint: Optional[str] = None
 
+        # pv metadata tracking
         self._enum_suffixes: set[str] = set()
+        self._float_units: Dict[str, str] = {}
+        self._float_precision: Dict[str, int] = {}
 
     # ---------- configuration / DI ----------
 
@@ -81,6 +84,8 @@ class PVGroup:
         control_limits: Optional[Tuple[float, float]] = None,
         with_alarm: bool = True,
         echo_on_put: bool = True,
+        units: Optional[str] = None,
+        precision: Optional[int] = None,
     ) -> None:
         """
         Create NTScalar('d') PV with standard display/control/valueAlarm meta.
@@ -91,9 +96,14 @@ class PVGroup:
         pv = SharedPV(nt=nt)
         self.pvs[suffix] = pv
 
+        u = self.default_units if units is None else units
+        p = self.default_precision if precision is None else int(precision)
+        self._float_units[suffix] = u
+        self._float_precision[suffix] = p
+
         V = nt.wrap(init, timestamp=self._time_fn())
-        V["display.units"] = self.default_units
-        V["display.precision"] = self.default_precision
+        V["display.units"] = u
+        V["display.precision"] = p
         if display_limits is not None:
             V["display.limitLow"], V["display.limitHigh"] = display_limits
         if control_limits is not None:
@@ -417,8 +427,10 @@ class PVGroup:
         V = nt.wrap(cur_val, timestamp=self._time_fn())
         try:
             if nt.code() == "d":
-                V["display.units"] = self.default_units
-                V["display.precision"] = self.default_precision
+                V["display.units"] = self._float_units.get(suffix, self.default_units)
+                V["display.precision"] = self._float_precision.get(
+                    suffix, self.default_precision
+                )
         except Exception:
             pass
         for k, v in updates.items():

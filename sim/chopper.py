@@ -170,8 +170,10 @@ class EssChopper:
         )
 
         # speed + accel
-        g.make_float("Spd_S", 0.0, writeable=True)  # setpoint (does NOT start)
-        g.make_float("Spd_R", 0.0, writeable=False)  # readback
+        g.make_float(
+            "Spd_S", 0.0, writeable=True, units="Hz"
+        )  # setpoint (does NOT start)
+        g.make_float("Spd_R", 0.0, writeable=False, units="Hz")  # readback
         g.add_mdel_fields("Spd_R")
         g.make_float("ACCEL_HZPS", self.cfg.accel_hzps, writeable=True)
 
@@ -186,15 +188,19 @@ class EssChopper:
 
         # parking
         g.make_enum("ParkPos_S", self.PARK_CHOICES, init_index=0, writeable=True)
-        g.make_float("Park_S", 0.0, writeable=True)  # only writable in "Window N"
-        g.make_float("Pos_R", 0.0, writeable=False)  # resolver + GUI offset
+        g.make_float(
+            "Park_S", 0.0, writeable=True, units="degrees"
+        )  # only writable in "Window N"
+        g.make_float(
+            "Pos_R", 0.0, writeable=False, units="degrees"
+        )  # resolver + GUI offset
         g.make_float("PARK_VELO_DPS", self.cfg.park_vel_degps, writeable=True)
 
         # delay composition
-        g.make_float("ChopDly-S", self._chop_dly_ns, writeable=True)
-        g.make_float("MechDly-S", self._mech_dly_deg, writeable=True)
-        g.make_float("BeamPosDly-S", self._beampos_dly_ns, writeable=True)
-        g.make_float("TotDly", 0.0, writeable=False)
+        g.make_float("ChopDly-S", self._chop_dly_ns, writeable=True, units="ns")
+        g.make_float("MechDly-S", self._mech_dly_deg, writeable=True, units="degrees")
+        g.make_float("BeamPosDly-S", self._beampos_dly_ns, writeable=True, units="ns")
+        g.make_float("TotDly", 0.0, writeable=False, units="ns")
 
         # lock/phase
         g.make_int("InPhs_R", 0, code="h", writeable=False)
@@ -215,7 +221,9 @@ class EssChopper:
         g.make_float("TDC_OFFSET_DEG", self.cfg.tdc_offset_deg, writeable=True)
 
         # EVR / TDC list (absolute epoch ns, flush at fixed rate)
-        g.make_float("TSFlushRate_R", float(self.cfg.evr_flush_hz), writeable=False)
+        g.make_float(
+            "TSFlushRate_R", float(self.cfg.evr_flush_hz), writeable=False, units="Hz"
+        )
         g.make_array_int64("02-TS-I", init=[], writeable=False)
         g.make_array_int64("DiffTSSamples", init=[], writeable=False)
 

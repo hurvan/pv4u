@@ -17,6 +17,7 @@ dependencies = [
 [project.scripts]
 pv4u-motor = "sim.motor_record:main"
 pv4u-chopper = "sim.chopper:main"
+pv4u-ls336 = "sim.lakeshore336:main"
 
 [tool.hatch.build.targets.wheel]
 # NOTE: the code imports 'common.pva_common', so we ship 'common' and 'sim' as top-level packages.
