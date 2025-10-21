@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from p4p.server import Server
+
 from common.pva_common import PVGroup, build_provider_dict
 
 
@@ -21,10 +22,10 @@ class ChopperConfig:
     egu_delay_ns: str = "ns"
     precision: int = 3
 
-    accel_hzps: float = 5.0              # constant accel (|dHz/ds|)
-    park_vel_degps: float = 90.0         # parking slew velocity
-    jitter_ns_rms: float = 200.0         # TDC jitter (RMS)
-    evr_flush_hz: float = 14.0           # EVR flush rate (Hz)
+    accel_hzps: float = 5.0  # constant accel (|dHz/ds|)
+    park_vel_degps: float = 90.0  # parking slew velocity
+    jitter_ns_rms: float = 200.0  # TDC jitter (RMS)
+    evr_flush_hz: float = 14.0  # EVR flush rate (Hz)
 
     # lock/phase settings
     pll_gain: float = 0.25
@@ -57,13 +58,34 @@ def now_ns() -> int:
 
 class EssChopper:
     # states and enums
-    STATE_CHOICES = ["Parked", "Parking", "Ramping", "Spinning", "Locking", "Locked", "Coasting", "Fault"]
+    STATE_CHOICES = [
+        "Parked",
+        "Parking",
+        "Ramping",
+        "Spinning",
+        "Locking",
+        "Locked",
+        "Coasting",
+        "Fault",
+    ]
     EXEC_CHOICES = ["Start", "Stop", "ClearAlarms"]
     PARK_CHOICES = ["Open", "Close"] + [f"Window {i}" for i in range(1, 11)]
     ROT_SENSE_CHOICES = ["CW_Positive", "CCW_Positive"]
-    ALARM_SUFFIXES = ["Comm_Alrm", "HW_Alrm", "IntLock_Alrm", "Lvl_Alrm", "Pos_Alrm", "Pwr_Alrm", "Ref_Alrm", "SW_Alrm", "Volt_Alrm"]
+    ALARM_SUFFIXES = [
+        "Comm_Alrm",
+        "HW_Alrm",
+        "IntLock_Alrm",
+        "Lvl_Alrm",
+        "Pos_Alrm",
+        "Pwr_Alrm",
+        "Ref_Alrm",
+        "SW_Alrm",
+        "Volt_Alrm",
+    ]
 
-    def __init__(self, prefix: str, cfg: Optional[ChopperConfig] = None, *, time_fn=time.time):
+    def __init__(
+        self, prefix: str, cfg: Optional[ChopperConfig] = None, *, time_fn=time.time
+    ):
         self.cfg = cfg or ChopperConfig()
         self.prefix = prefix.rstrip(":")
         self.time_fn = time_fn
@@ -81,13 +103,19 @@ class EssChopper:
         self._chop_dly_ns: float = self.cfg.chop_delay_ns
         self._mech_dly_deg: float = self.cfg.mech_delay_deg
         self._beampos_dly_ns: float = self.cfg.beampos_delay_ns
-        self._phase_target_ns: float = 0.0  # absolute desired time offset (ns) rotor->EVR drive pulse
+        self._phase_target_ns: float = (
+            0.0  # absolute desired time offset (ns) rotor->EVR drive pulse
+        )
 
         # EVR timing
-        self._evr_period_ns: int = int(round(1e9 / self.cfg.evr_flush_hz))   # fixed flush frame period
+        self._evr_period_ns: int = int(
+            round(1e9 / self.cfg.evr_flush_hz)
+        )  # fixed flush frame period
         self._last_flush_ns: int = now_ns()
-        self._evr_drive_hz: float = 14.0                                     # EVR drive output (follows Spd_S)
-        self._evr_phase_ns: float = float(now_ns())                          # absolute phase origin (ns) of EVR drive pulses
+        self._evr_drive_hz: float = 14.0  # EVR drive output (follows Spd_S)
+        self._evr_phase_ns: float = float(
+            now_ns()
+        )  # absolute phase origin (ns) of EVR drive pulses
 
         # TDC state
         self._last_tdc_ns: Optional[int] = None
@@ -127,22 +155,32 @@ class EssChopper:
 
         # commands/state
         g.make_enum("C_Execute", self.EXEC_CHOICES, init_index=1, writeable=True)
-        g.make_enum("ChopState_R", self.STATE_CHOICES, init_index=self._state_idx, writeable=False)
+        g.make_enum(
+            "ChopState_R",
+            self.STATE_CHOICES,
+            init_index=self._state_idx,
+            writeable=False,
+        )
 
         # speed + accel
-        g.make_float("Spd_S", 0.0, writeable=True)        # setpoint (does NOT start)
-        g.make_float("Spd_R", 0.0, writeable=False)       # readback
+        g.make_float("Spd_S", 0.0, writeable=True)  # setpoint (does NOT start)
+        g.make_float("Spd_R", 0.0, writeable=False)  # readback
         g.add_mdel_fields("Spd_R")
         g.make_float("ACCEL_HZPS", self.cfg.accel_hzps, writeable=True)
 
         # rotation sense + dir readback
-        g.make_enum("ROT_SENSE", self.ROT_SENSE_CHOICES, init_index=self._rot_sense_idx, writeable=True)
+        g.make_enum(
+            "ROT_SENSE",
+            self.ROT_SENSE_CHOICES,
+            init_index=self._rot_sense_idx,
+            writeable=True,
+        )
         g.make_str("Dir_R", "CW", writeable=False)
 
         # parking
         g.make_enum("ParkPos_S", self.PARK_CHOICES, init_index=0, writeable=True)
-        g.make_float("Park_S", 0.0, writeable=True)       # only writable in "Window N"
-        g.make_float("Pos_R", 0.0, writeable=False)       # resolver + GUI offset
+        g.make_float("Park_S", 0.0, writeable=True)  # only writable in "Window N"
+        g.make_float("Pos_R", 0.0, writeable=False)  # resolver + GUI offset
         g.make_float("PARK_VELO_DPS", self.cfg.park_vel_degps, writeable=True)
 
         # delay composition
@@ -157,12 +195,16 @@ class EssChopper:
         g.make_float("LOCK_THR_US", self.cfg.lock_thr_us, writeable=True)
         g.make_int("LOCK_ACQ_COUNT", self.cfg.lock_acq_count, code="h", writeable=True)
         g.make_float("LOCK_LOSS_US", self.cfg.lock_loss_us, writeable=True)
-        g.make_int("LOCK_LOSS_COUNT", self.cfg.lock_loss_count, code="h", writeable=True)
+        g.make_int(
+            "LOCK_LOSS_COUNT", self.cfg.lock_loss_count, code="h", writeable=True
+        )
         g.make_float("PLL_GAIN", self.cfg.pll_gain, writeable=True)
 
         # jitter + GUI offsets
         g.make_float("JITTER_NS_RMS", self.cfg.jitter_ns_rms, writeable=True)
-        g.make_float("RESOLVER_OFFSET_DEG", self.cfg.resolver_offset_deg, writeable=True)
+        g.make_float(
+            "RESOLVER_OFFSET_DEG", self.cfg.resolver_offset_deg, writeable=True
+        )
         g.make_float("TDC_OFFSET_DEG", self.cfg.tdc_offset_deg, writeable=True)
 
         # EVR / TDC list (absolute epoch ns, flush at fixed rate)
@@ -173,7 +215,9 @@ class EssChopper:
         # alarms
         for sfx in self.ALARM_SUFFIXES:
             g.make_int(sfx, 0, code="h", writeable=False)
-        g.make_enum("FaultInject", ["None"] + self.ALARM_SUFFIXES, init_index=0, writeable=True)
+        g.make_enum(
+            "FaultInject", ["None"] + self.ALARM_SUFFIXES, init_index=0, writeable=True
+        )
 
     # ---- PUT handling ----
 
@@ -188,7 +232,9 @@ class EssChopper:
                 self._spin_enable = False
                 self._spd_s_hz = 0.0
                 self.grp.post_num("Spd_S", 0.0)
-                self._transition_state("Coasting" if abs(self._spd_r_hz) > 0.1 else "Parked")
+                self._transition_state(
+                    "Coasting" if abs(self._spd_r_hz) > 0.1 else "Parked"
+                )
             elif cmd == "ClearAlarms":
                 for k in list(self._alarms_active):
                     self._alarms_active[k] = False
@@ -271,15 +317,21 @@ class EssChopper:
     def _compute_totdly(self):
         """Absolute desired time offset (ns) rotor→EVR drive pulse."""
         spd_mag = abs(self._spd_s_hz)
-        mech_ns = 0.0 if spd_mag <= 0.0 else (self._mech_dly_deg / 360.0) * (1e9 / spd_mag)
-        self._phase_target_ns = float(self._chop_dly_ns + self._beampos_dly_ns + mech_ns)
+        mech_ns = (
+            0.0 if spd_mag <= 0.0 else (self._mech_dly_deg / 360.0) * (1e9 / spd_mag)
+        )
+        self._phase_target_ns = float(
+            self._chop_dly_ns + self._beampos_dly_ns + mech_ns
+        )
         self.grp.post_num("TotDly", self._phase_target_ns)
 
     def _update_dir_r(self):
         if self._spd_r_hz == 0.0:
             d = "CW"
         else:
-            phys_cw = (self._spd_r_hz > 0.0 and self._rot_sense_idx == 0) or (self._spd_r_hz < 0.0 and self._rot_sense_idx == 1)
+            phys_cw = (self._spd_r_hz > 0.0 and self._rot_sense_idx == 0) or (
+                self._spd_r_hz < 0.0 and self._rot_sense_idx == 1
+            )
             d = "CW" if phys_cw else "CCW"
         # string PV; posting bare string is fine
         self.grp.pvs["Dir_R"].post(d)
@@ -299,7 +351,9 @@ class EssChopper:
 
     def _advance_resolver(self, dt: float):
         if abs(self._spd_r_hz) > 0.01:
-            self._resolver_deg = (self._resolver_deg + 360.0 * self._spd_r_hz * dt) % 360.0
+            self._resolver_deg = (
+                self._resolver_deg + 360.0 * self._spd_r_hz * dt
+            ) % 360.0
         else:
             if self._state_idx == self.STATE_CHOICES.index("Parking"):
                 cur = self._resolver_deg
@@ -314,7 +368,9 @@ class EssChopper:
                         self._resolver_deg = tgt
                         self._transition_state("Parked")
                     else:
-                        self._resolver_deg = (cur + (step if diff > 0 else -step)) % 360.0
+                        self._resolver_deg = (
+                            cur + (step if diff > 0 else -step)
+                        ) % 360.0
         disp = (self._resolver_deg + self.cfg.resolver_offset_deg) % 360.0
         self.grp.post_num("Pos_R", disp)
 
@@ -357,7 +413,11 @@ class EssChopper:
             t += int(rev_ns)
 
         while t < end:
-            jitter = int(random.gauss(0.0, self.cfg.jitter_ns_rms)) if self.cfg.jitter_ns_rms > 0.0 else 0
+            jitter = (
+                int(random.gauss(0.0, self.cfg.jitter_ns_rms))
+                if self.cfg.jitter_ns_rms > 0.0
+                else 0
+            )
             out.append(int(t + jitter))
             t += int(rev_ns)
 
@@ -381,7 +441,11 @@ class EssChopper:
         Tdrv = 1e9 / max(1e-6, abs(self._evr_drive_hz))
 
         rev_ns_opt = self._rev_period_ns()
-        gui_ns = 0.0 if rev_ns_opt is None else (self.cfg.tdc_offset_deg / 360.0) * rev_ns_opt
+        gui_ns = (
+            0.0
+            if rev_ns_opt is None
+            else (self.cfg.tdc_offset_deg / 360.0) * rev_ns_opt
+        )
         tau_ns = float(self._phase_target_ns + gui_ns)
 
         best_err = None
@@ -390,7 +454,12 @@ class EssChopper:
         for ts in tdcs:
             k = int(round((ts - self._evr_phase_ns) / Tdrv))
             evr_ts = self._evr_phase_ns + k * Tdrv
-            err = self._wrap_to_period((ts - evr_ts) - tau_ns, Tdrv) + random.gauss(0.0, self.cfg.jitter_ns_rms) if self.cfg.jitter_ns_rms > 0.0 else 0.0
+            err = (
+                self._wrap_to_period((ts - evr_ts) - tau_ns, Tdrv)
+                + random.gauss(0.0, self.cfg.jitter_ns_rms)
+                if self.cfg.jitter_ns_rms > 0.0
+                else 0.0
+            )
 
             self._phase_err_hist.append(err)
             if len(self._phase_err_hist) > self.cfg.phase_err_window:
@@ -464,7 +533,13 @@ class EssChopper:
                     self.STATE_CHOICES.index("Coasting"),
                     self.STATE_CHOICES.index("Locked"),
                 ):
-                    self._transition_state("Parking" if not math.isclose(self._resolver_deg, self._target_park_deg, abs_tol=1e-3) else "Parked")
+                    self._transition_state(
+                        "Parking"
+                        if not math.isclose(
+                            self._resolver_deg, self._target_park_deg, abs_tol=1e-3
+                        )
+                        else "Parked"
+                    )
 
             self._advance_resolver(dt)
 
@@ -506,12 +581,20 @@ class EssChopper:
 class ChicLink:
     def __init__(self, chic_prefix: str, *, time_fn=time.time):
         # CHIC uses colon-joined record names too
-        self.grp = PVGroup(chic_prefix, default_units="", default_precision=0, time_fn=time_fn, name_join=":")
+        self.grp = PVGroup(
+            chic_prefix,
+            default_units="",
+            default_precision=0,
+            time_fn=time_fn,
+            name_join=":",
+        )
         self.grp.make_str("ConnectedR", "Connected", writeable=True)
 
 
 def main():
-    ap = argparse.ArgumentParser(description="ESS chopper PVA simulator (records use colon, not fields)")
+    ap = argparse.ArgumentParser(
+        description="ESS chopper PVA simulator (records use colon, not fields)"
+    )
     ap.add_argument("--prefix", default="SIM:CHP1:", help="e.g. 'SIM:CHP1:'")
     ap.add_argument("--chic-prefix", default="SIM:CHIC1:", help="e.g. 'SIM:CHIC1:'")
     ap.add_argument("--accel", type=float, default=5.0)
@@ -538,7 +621,9 @@ def main():
         groups[args.chic_prefix.rstrip(":")] = chic.grp
 
     providers = build_provider_dict(groups)
-    print(f"[sim-chopper] Serving at '{args.prefix}*' (records with ':'). TDC list PV: '{args.prefix}02-TS-I'. Ctrl+C to exit.")
+    print(
+        f"[sim-chopper] Serving at '{args.prefix}*' (records with ':'). TDC list PV: '{args.prefix}02-TS-I'. Ctrl+C to exit."
+    )
     try:
         with Server(providers=[providers]) as S:
             while True:

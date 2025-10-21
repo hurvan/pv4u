@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Callable, Dict, Iterable, Optional, Tuple, Sequence
+from typing import Any, Callable, Dict, Iterable, Optional, Sequence, Tuple
 
 from p4p.nt import NTEnum, NTScalar
 from p4p.server.thread import SharedPV
@@ -107,6 +107,7 @@ class PVGroup:
         pv.open(V)
 
         if writeable:
+
             @pv.put
             def _on_put(pv_obj, op, _suffix=suffix):
                 raw = op.value()
@@ -116,7 +117,9 @@ class PVGroup:
                     try:
                         new = float(raw)
                     except Exception:
-                        op.done(error=f"Bad put payload for {self.prefix}.{_suffix}: {e}")
+                        op.done(
+                            error=f"Bad put payload for {self.prefix}.{_suffix}: {e}"
+                        )
                         return
                 if self._write_cb:
                     self._write_cb(_suffix, new)
@@ -125,7 +128,9 @@ class PVGroup:
                     self._last_sent[_suffix] = (new, 0, "")
                 op.done()
 
-    def make_int(self, suffix: str, init: int, *, code: str = "h", writeable=True) -> None:
+    def make_int(
+        self, suffix: str, init: int, *, code: str = "h", writeable=True
+    ) -> None:
         nt = NTScalar(code, display=True, control=True, form=True)
         self.nts[suffix] = nt
         pv = SharedPV(nt=nt)
@@ -138,6 +143,7 @@ class PVGroup:
         pv.open(V)
 
         if writeable:
+
             @pv.put
             def _on_put(pv_obj, op, _suffix=suffix):
                 raw = op.value()
@@ -147,7 +153,9 @@ class PVGroup:
                     try:
                         new = int(raw)
                     except Exception:
-                        op.done(error=f"Bad put payload for {self.prefix}.{_suffix}: {e}")
+                        op.done(
+                            error=f"Bad put payload for {self.prefix}.{_suffix}: {e}"
+                        )
                         return
                 if self._write_cb:
                     self._write_cb(_suffix, new)
@@ -168,6 +176,7 @@ class PVGroup:
         pv.open(V)
 
         if writeable:
+
             @pv.put
             def _on_put(pv_obj, op, _suffix=suffix):
                 raw = op.value()
@@ -177,7 +186,9 @@ class PVGroup:
                     try:
                         new = str(raw)
                     except Exception:
-                        op.done(error=f"Bad put payload for {self.prefix}.{_suffix}: {e}")
+                        op.done(
+                            error=f"Bad put payload for {self.prefix}.{_suffix}: {e}"
+                        )
                         return
                 if self._write_cb:
                     self._write_cb(_suffix, new)
@@ -185,7 +196,9 @@ class PVGroup:
                 self._last_sent[_suffix] = (new, 0, "")
                 op.done()
 
-    def make_enum(self, suffix: str, choices, *, init_index: int = 0, writeable=True) -> None:
+    def make_enum(
+        self, suffix: str, choices, *, init_index: int = 0, writeable=True
+    ) -> None:
         choices = list(choices)
         nt = NTEnum(display=True, control=True)
         self.nts[suffix] = nt
@@ -263,13 +276,16 @@ class PVGroup:
             return int(payload)
 
         if writeable:
+
             @pv.put
             def _on_put(pv_obj, op, _suffix=suffix, _choices=choices):
                 raw = op.value()
                 try:
                     new_idx = _parse_enum_put(raw)
                     if not (0 <= new_idx < len(_choices)):
-                        raise ValueError(f"enum index {new_idx} out of range 0..{len(_choices) - 1}")
+                        raise ValueError(
+                            f"enum index {new_idx} out of range 0..{len(_choices) - 1}"
+                        )
                 except Exception as e:
                     op.done(error=f"Bad put payload for {self.prefix}.{_suffix}: {e}")
                     return
@@ -284,7 +300,9 @@ class PVGroup:
 
     # ---------- Array PVs (added) ----------
 
-    def make_array_int64(self, suffix: str, init: Sequence[int] | None = None, *, writeable=False) -> None:
+    def make_array_int64(
+        self, suffix: str, init: Sequence[int] | None = None, *, writeable=False
+    ) -> None:
         """
         Create NTScalar('al') PV for array of int64 (e.g., lists of epoch-ns timestamps).
         """
@@ -301,6 +319,7 @@ class PVGroup:
         pv.open(V)
 
         if writeable:
+
             @pv.put
             def _on_put(pv_obj, op, _suffix=suffix):
                 raw = op.value()
@@ -326,7 +345,9 @@ class PVGroup:
         """
         Post a new array value (uses the same timestamp/severity/message style as scalars).
         """
-        self.pvs[suffix].post(values, timestamp=self._time_fn(), severity=severity, message=message)
+        self.pvs[suffix].post(
+            values, timestamp=self._time_fn(), severity=severity, message=message
+        )
         self._last_sent[suffix] = ("len", len(values), "")
 
     # ---------- alias PV ('<prefix>') ----------
@@ -436,7 +457,9 @@ class PVGroup:
             return
         if not force and prev is not None and prev == (value, severity, message):
             return
-        self.pvs[suffix].post(value, timestamp=self._time_fn(), severity=severity, message=message)
+        self.pvs[suffix].post(
+            value, timestamp=self._time_fn(), severity=severity, message=message
+        )
         self._last_sent[suffix] = (value, severity, message)
 
     # root alias posts (obey same MDEL as throttled fields)
@@ -464,7 +487,9 @@ class PVGroup:
             return
         if not force and prev is not None and prev == (value, severity, message):
             return
-        self.root_pv.post(value, timestamp=self._time_fn(), severity=severity, message=message)
+        self.root_pv.post(
+            value, timestamp=self._time_fn(), severity=severity, message=message
+        )
         self._last_root = (value, severity, message)
 
     def post_root_meta(self, updates: Dict[str, Any]) -> None:

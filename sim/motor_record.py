@@ -8,12 +8,13 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
 from p4p.server import Server
-from common.pva_common import PVGroup, build_provider_dict
 
+from common.pva_common import PVGroup, build_provider_dict
 
 # ----------------------------
 # Helpers and constants
 # ----------------------------
+
 
 @dataclass
 class MotorConfig:
@@ -57,6 +58,7 @@ MSTA_HOMED = 15
 # ----------------------------
 # Motion model
 # ----------------------------
+
 
 class MotorState:
     def __init__(self, cfg: MotorConfig):
@@ -102,7 +104,9 @@ class MotorState:
             v = min(v, self.cfg.vmax)
         return v
 
-    def _start_motion(self, d_target: float, dir_override: Optional[bool] = None) -> None:
+    def _start_motion(
+        self, d_target: float, dir_override: Optional[bool] = None
+    ) -> None:
         self.lvio = 0
         self.dial_target = d_target
         self._moving = True
@@ -112,7 +116,8 @@ class MotorState:
         self._dmov_ready_ts = 0.0
         dir_positive = (
             (self.dial_target - self.dial_pos) >= 0.0
-            if dir_override is None else bool(dir_override)
+            if dir_override is None
+            else bool(dir_override)
         )
         self.msta = _set_bit(self.msta, MSTA_DIRECTION, dir_positive)
         self.msta = _set_bit(self.msta, MSTA_MOVING, True)
@@ -137,7 +142,9 @@ class MotorState:
         lo_u, hi_u = self.cfg.user_limits
         lo_d, hi_d = self.cfg.dial_limits
 
-        if abs(self.user_from_dial(d) - self.user_from_dial(self.dial_pos)) < max(self.cfg.spdb, 0.0):
+        if abs(self.user_from_dial(d) - self.user_from_dial(self.dial_pos)) < max(
+            self.cfg.spdb, 0.0
+        ):
             self._arm_dmov_pulse_without_motion()
             return None
 
@@ -207,7 +214,11 @@ class MotorState:
             if self._homing and at_home:
                 self.msta = _set_bit(self.msta, MSTA_HOMED, True)
                 self._homing = False
-            if (self.dmov == 0) and (self._dmov_ready_ts > 0) and (now >= self._dmov_ready_ts):
+            if (
+                (self.dmov == 0)
+                and (self._dmov_ready_ts > 0)
+                and (now >= self._dmov_ready_ts)
+            ):
                 self.dmov = 1
                 self.msta = _set_bit(self.msta, MSTA_DONE, True)
             return
@@ -232,8 +243,11 @@ class MotorState:
         else:
             v_target = self.cfg.velo
         v_target = self._limit_v(v_target)
-        a = (self.cfg.jar if (self._jogging and self.cfg.jar > 0.0)
-             else v_target / max(self.cfg.accl, 1e-6))
+        a = (
+            self.cfg.jar
+            if (self._jogging and self.cfg.jar > 0.0)
+            else v_target / max(self.cfg.accl, 1e-6)
+        )
 
         v = self._vel_now
         s_stop = (v * v) / (2 * max(a, 1e-9))
@@ -269,6 +283,7 @@ class MotorState:
 # Motor device using PVGroup
 # ----------------------------
 
+
 class Motor:
     def __init__(self, prefix: str, cfg: MotorConfig, tick_hz: float = 10.0):
         self.cfg = cfg
@@ -300,23 +315,53 @@ class Motor:
         d_lo, d_hi = self.cfg.dial_limits
 
         # Drives (device echoes; don't double-echo on put)
-        self.pvs.make_float("VAL", 0.0, writeable=True,
-                            display_limits=(u_lo, u_hi), control_limits=(u_lo, u_hi),
-                            echo_on_put=False)
-        self.pvs.make_float("DVAL", 0.0, writeable=True,
-                            display_limits=(d_lo, d_hi), control_limits=(d_lo, d_hi),
-                            echo_on_put=False)
-        self.pvs.make_float("RVAL", 0.0, writeable=True,
-                            display_limits=(d_lo, d_hi), control_limits=(d_lo, d_hi),
-                            echo_on_put=False)
-        self.pvs.make_float("RLV", 0.0, writeable=True,
-                            display_limits=(u_lo, u_hi), control_limits=(u_lo, u_hi))
+        self.pvs.make_float(
+            "VAL",
+            0.0,
+            writeable=True,
+            display_limits=(u_lo, u_hi),
+            control_limits=(u_lo, u_hi),
+            echo_on_put=False,
+        )
+        self.pvs.make_float(
+            "DVAL",
+            0.0,
+            writeable=True,
+            display_limits=(d_lo, d_hi),
+            control_limits=(d_lo, d_hi),
+            echo_on_put=False,
+        )
+        self.pvs.make_float(
+            "RVAL",
+            0.0,
+            writeable=True,
+            display_limits=(d_lo, d_hi),
+            control_limits=(d_lo, d_hi),
+            echo_on_put=False,
+        )
+        self.pvs.make_float(
+            "RLV",
+            0.0,
+            writeable=True,
+            display_limits=(u_lo, u_hi),
+            control_limits=(u_lo, u_hi),
+        )
 
         # Readbacks/status
-        self.pvs.make_float("RBV", 0.0, writeable=False,
-                            display_limits=(u_lo, u_hi), control_limits=(u_lo, u_hi))
-        self.pvs.make_float("DRBV", 0.0, writeable=False,
-                            display_limits=(d_lo, d_hi), control_limits=(d_lo, d_hi))
+        self.pvs.make_float(
+            "RBV",
+            0.0,
+            writeable=False,
+            display_limits=(u_lo, u_hi),
+            control_limits=(u_lo, u_hi),
+        )
+        self.pvs.make_float(
+            "DRBV",
+            0.0,
+            writeable=False,
+            display_limits=(d_lo, d_hi),
+            control_limits=(d_lo, d_hi),
+        )
         self.pvs.make_int("DMOV", 1, code="h", writeable=False)
         self.pvs.make_int("MOVN", 0, code="h", writeable=False)
         self.pvs.make_int("MSTA", 0, code="I", writeable=False)
@@ -335,7 +380,9 @@ class Motor:
         self.pvs.make_float("DLY", self.cfg.dly)
 
         # Mapping / calibration / enable
-        self.pvs.make_enum("DIR", ["Pos", "Neg"], init_index=0 if self.cfg.dir_pos else 1)
+        self.pvs.make_enum(
+            "DIR", ["Pos", "Neg"], init_index=0 if self.cfg.dir_pos else 1
+        )
         self.pvs.make_float("OFF", self.cfg.off)
         self.pvs.make_int("SET", 0, code="h")
         self.pvs.make_int("FOFF", 0, code="h")
@@ -379,7 +426,9 @@ class Motor:
         )
 
         rbv = s.user_from_dial(s.dial_pos)
-        self.pvs.post_num("DRBV", s.dial_pos, severity=sev, message=msg, force=force_final)
+        self.pvs.post_num(
+            "DRBV", s.dial_pos, severity=sev, message=msg, force=force_final
+        )
         self.pvs.post_num("RBV", rbv, severity=sev, message=msg, force=force_final)
         self.pvs.post_root_num(rbv, severity=sev, message=msg, force=force_final)
 
@@ -675,34 +724,59 @@ class Motor:
 # Factory & CLI
 # ----------------------------
 
-def create_motor(prefix: str, cfg: Optional[MotorConfig] = None, tick_hz: float = 50.0) -> Motor:
+
+def create_motor(
+    prefix: str, cfg: Optional[MotorConfig] = None, tick_hz: float = 50.0
+) -> Motor:
     return Motor(prefix, cfg or MotorConfig(), tick_hz=tick_hz)
+
 
 def main():
     ap = argparse.ArgumentParser(
         description="Simulated EPICS motor record (p4p/PVA) using common PV core with metadata + MDEL + VAL/RBV alias."
     )
     ap.add_argument("--prefix", default="SIM:M1", help="PV prefix (e.g., 'SIM:M1')")
-    ap.add_argument("--tick-hz", type=float, default=10.0, help="Simulation tick frequency")
+    ap.add_argument(
+        "--tick-hz", type=float, default=10.0, help="Simulation tick frequency"
+    )
     ap.add_argument("--egu", default="mm", help="Engineering units string")
     ap.add_argument("--prec", type=int, default=3, help="Display precision")
-    ap.add_argument("--llm", type=float, default=-1000.0, help="User low limit (VAL/RBV)")
-    ap.add_argument("--hlm", type=float, default=+1000.0, help="User high limit (VAL/RBV)")
-    ap.add_argument("--dllm", type=float, default=-1000.0, help="Dial low limit (DVAL/DRBV)")
-    ap.add_argument("--dhlm", type=float, default=+1000.0, help="Dial high limit (DVAL/DRBV)")
+    ap.add_argument(
+        "--llm", type=float, default=-1000.0, help="User low limit (VAL/RBV)"
+    )
+    ap.add_argument(
+        "--hlm", type=float, default=+1000.0, help="User high limit (VAL/RBV)"
+    )
+    ap.add_argument(
+        "--dllm", type=float, default=-1000.0, help="Dial low limit (DVAL/DRBV)"
+    )
+    ap.add_argument(
+        "--dhlm", type=float, default=+1000.0, help="Dial high limit (DVAL/DRBV)"
+    )
     ap.add_argument("--velo", type=float, default=5.0, help="Motion VELO (EGU/s)")
     ap.add_argument("--vbas", type=float, default=0.0, help="Motion VBAS (EGU/s)")
-    ap.add_argument("--vmax", type=float, default=0.0, help="Max velocity VMAX (EGU/s, 0=unlimited)")
+    ap.add_argument(
+        "--vmax", type=float, default=0.0, help="Max velocity VMAX (EGU/s, 0=unlimited)"
+    )
     ap.add_argument("--accl", type=float, default=1.0, help="ACCL (seconds to VELO)")
     ap.add_argument("--hvel", type=float, default=2.0, help="Homing velocity")
     ap.add_argument("--jvel", type=float, default=2.0, help="Jog velocity")
-    ap.add_argument("--jar", type=float, default=0.0, help="Jog acceleration (EGU/s^2); 0=>use ACCL")
-    ap.add_argument("--rdbd", type=float, default=0.001, help="In-position deadband (EGU)")
+    ap.add_argument(
+        "--jar", type=float, default=0.0, help="Jog acceleration (EGU/s^2); 0=>use ACCL"
+    )
+    ap.add_argument(
+        "--rdbd", type=float, default=0.001, help="In-position deadband (EGU)"
+    )
     ap.add_argument("--spdb", type=float, default=0.0, help="Set point deadband (EGU)")
     ap.add_argument("--dly", type=float, default=0.0, help="DMOV settle delay (s)")
     ap.add_argument("--off", type=float, default=0.0, help="User offset OFF")
     ap.add_argument("--dir", type=int, default=0, help="DIR (0=Pos, 1=Neg)")
-    ap.add_argument("--mdel", type=float, default=0.1, help="Initial MDEL deadband (EGU) for RBV/DRBV")
+    ap.add_argument(
+        "--mdel",
+        type=float,
+        default=0.1,
+        help="Initial MDEL deadband (EGU) for RBV/DRBV",
+    )
     args = ap.parse_args()
 
     cfg = MotorConfig(
