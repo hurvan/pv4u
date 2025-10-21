@@ -26,6 +26,7 @@ class ChopperConfig:
     park_vel_degps: float = 90.0  # parking slew velocity
     jitter_ns_rms: float = 200.0  # TDC jitter (RMS)
     evr_flush_hz: float = 14.0  # EVR flush rate (Hz)
+    tick_hz: float = 50.0  # main loop tick rate (Hz)
 
     # lock/phase settings
     pll_gain: float = 0.25
@@ -139,7 +140,7 @@ class EssChopper:
         self._alarms_active = {s: False for s in self.ALARM_SUFFIXES}
 
         # loop
-        self._tick = 1.0 / 50.0
+        self._tick = 1.0 / self.cfg.tick_hz
         self._stop_evt = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
@@ -619,6 +620,7 @@ def main():
     )
     ap.add_argument("--prefix", default="SIM:CHP1:", help="e.g. 'SIM:CHP1:'")
     ap.add_argument("--chic-prefix", default="SIM:CHIC1:", help="e.g. 'SIM:CHIC1:'")
+    ap.add_argument("--tick-hz", type=float, default=10.0, help="Simulation tick")
     ap.add_argument("--accel", type=float, default=5.0)
     ap.add_argument("--park-vel", type=float, default=90.0)
     ap.add_argument("--jitter-ns", type=float, default=200.0)
@@ -634,6 +636,7 @@ def main():
         evr_flush_hz=args.flush_hz,
         lock_thr_us=args.lock_thr_us,
         rot_sense_index=args.rot_sense,
+        tick_hz=args.tick_hz,
     )
     ch = EssChopper(args.prefix, cfg).start()
     chic = ChicLink(args.chic_prefix) if args.chic_prefix else None
