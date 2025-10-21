@@ -384,7 +384,6 @@ class PVGroup:
 
         # enum: rebuild a full Value; post without kwargs
         if suffix in self._enum_suffixes:
-            print("POST ENUM META", suffix, updates)
             try:
                 idx = int(cur["value.index"])
             except Exception:
@@ -459,7 +458,6 @@ class PVGroup:
 
         # enum: build an NTEnum Value and post without kwargs
         if suffix in self._enum_suffixes:
-            print("POST ENUM", suffix, value)
             prev = self._last_sent.get(suffix)
             idx = int(value)
             if not force and prev is not None and prev == (idx, severity, message):

@@ -70,6 +70,8 @@ class EssChopper:
     ]
     EXEC_CHOICES = ["Start", "Stop", "ClearAlarms"]
     PARK_CHOICES = ["Open", "Close"] + [f"Window {i}" for i in range(1, 11)]
+    PARK_OPEN = 15.0  # degrees
+    PARK_CLOSE = 195.0  # degrees
     ROT_SENSE_CHOICES = ["CW_Positive", "CCW_Positive"]
     ALARM_SUFFIXES = [
         "Comm_Alrm",
@@ -98,6 +100,11 @@ class EssChopper:
         self._target_park_deg: float = 0.0
         self._park_mode_idx: int = 0
         self._state_idx: int = 0
+        self._park_pos_map: Dict[int, float] = {
+            i: 0.0 for i in range(len(self.PARK_CHOICES))
+        }
+        self._park_pos_map[0] = self.PARK_OPEN
+        self._park_pos_map[1] = self.PARK_CLOSE
 
         # delays / EVR
         self._chop_dly_ns: float = self.cfg.chop_delay_ns
@@ -132,7 +139,7 @@ class EssChopper:
         self._alarms_active = {s: False for s in self.ALARM_SUFFIXES}
 
         # loop
-        self._tick = 1.0 / 200.0
+        self._tick = 1.0 / 50.0
         self._stop_evt = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
@@ -248,11 +255,16 @@ class EssChopper:
             self._rot_sense_idx = int(value)
         elif suffix == "ParkPos_S":
             self._park_mode_idx = int(value)
+            # set the target stored in the map
+            self._target_park_deg = self._park_pos_map[self._park_mode_idx]
+            if abs(self._spd_r_hz) < 0.01:
+                self._transition_state("Parking")
         elif suffix == "Park_S":
             if self._park_mode_idx < 2:  # Open/Close: read-only
                 self._trip_alarm("Pos_Alrm", "Park_S is read-only in Open/Close")
             else:
                 self._target_park_deg = float(value) % 360.0
+                self._park_pos_map[self._park_mode_idx] = self._target_park_deg
                 if abs(self._spd_r_hz) < 0.01:
                     self._transition_state("Parking")
         elif suffix == "PARK_VELO_DPS":
@@ -372,7 +384,9 @@ class EssChopper:
                             cur + (step if diff > 0 else -step)
                         ) % 360.0
         disp = (self._resolver_deg + self.cfg.resolver_offset_deg) % 360.0
-        self.grp.post_num("Pos_R", disp)
+        # only post if speed is below 2hz
+        if abs(self._spd_r_hz) < 2.0:
+            self.grp.post_num("Pos_R", disp)
 
     def _evr_frame_t0_ns(self, t_ns: int) -> int:
         P = self._evr_period_ns
